@@ -15,9 +15,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::args::ConfigFile;
+use crate::npm::NpmPackageId;
 use crate::npm::NpmPackageReq;
 use crate::npm::NpmResolutionPackage;
 use crate::tools::fmt::format_json;
+use crate::Flags;
 
 #[derive(Debug)]
 pub struct LockfileError(String);
@@ -38,7 +41,7 @@ pub struct NpmPackageInfo {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NpmContent {
-  /// Mapping between requests for npm packages and resolved specifiers, eg.
+  /// Mapping between requests for npm packages and resolved packages, eg.
   /// {
   ///   "chalk": "chalk@5.0.0"
   ///   "react@17": "react@17.0.1"
@@ -73,6 +76,16 @@ pub struct LockfileContent {
   pub npm: NpmContent,
 }
 
+impl LockfileContent {
+  fn empty() -> Self {
+    Self {
+      version: "2".to_string(),
+      remote: BTreeMap::new(),
+      npm: NpmContent::default(),
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct Lockfile {
   pub overwrite: bool,
@@ -82,35 +95,95 @@ pub struct Lockfile {
 }
 
 impl Lockfile {
+  pub fn discover(
+    flags: &Flags,
+    maybe_config_file: Option<&ConfigFile>,
+  ) -> Result<Option<Lockfile>, AnyError> {
+    if flags.no_lock {
+      return Ok(None);
+    }
+
+    let filename = match flags.lock {
+      Some(ref lock) => PathBuf::from(lock),
+      None if flags.unstable => match maybe_config_file {
+        Some(config_file) => {
+          if config_file.specifier.scheme() == "file" {
+            let mut path = config_file.specifier.to_file_path().unwrap();
+            path.set_file_name("deno.lock");
+            path
+          } else {
+            return Ok(None);
+          }
+        }
+        None => return Ok(None),
+      },
+      None => return Ok(None),
+    };
+
+    let lockfile = Self::new(filename, flags.lock_write)?;
+    Ok(Some(lockfile))
+  }
+
   pub fn new(filename: PathBuf, overwrite: bool) -> Result<Lockfile, AnyError> {
     // Writing a lock file always uses the new format.
-    let content = if overwrite {
+    if overwrite {
+      return Ok(Lockfile {
+        overwrite,
+        has_content_changed: false,
+        content: LockfileContent::empty(),
+        filename,
+      });
+    }
+
+    let result = match std::fs::read_to_string(&filename) {
+      Ok(content) => Ok(content),
+      Err(e) => {
+        if e.kind() == std::io::ErrorKind::NotFound {
+          return Ok(Lockfile {
+            overwrite,
+            has_content_changed: false,
+            content: LockfileContent::empty(),
+            filename,
+          });
+        } else {
+          Err(e)
+        }
+      }
+    };
+
+    let s = result.with_context(|| {
+      format!("Unable to read lockfile: \"{}\"", filename.display())
+    })?;
+    let value: serde_json::Value =
+      serde_json::from_str(&s).with_context(|| {
+        format!(
+          "Unable to parse contents of the lockfile \"{}\"",
+          filename.display()
+        )
+      })?;
+    let version = value.get("version").and_then(|v| v.as_str());
+    let content = if version == Some("2") {
+      serde_json::from_value::<LockfileContent>(value).with_context(|| {
+        format!(
+          "Unable to parse contents of the lockfile \"{}\"",
+          filename.display()
+        )
+      })?
+    } else {
+      // If there's no version field, we assume that user is using the old
+      // version of the lockfile. We'll migrate it in-place into v2 and it
+      // will be writte in v2 if user uses `--lock-write` flag.
+      let remote: BTreeMap<String, String> = serde_json::from_value(value)
+        .with_context(|| {
+          format!(
+            "Unable to parse contents of the lockfile \"{}\"",
+            filename.display()
+          )
+        })?;
       LockfileContent {
         version: "2".to_string(),
-        remote: BTreeMap::new(),
+        remote,
         npm: NpmContent::default(),
-      }
-    } else {
-      let s = std::fs::read_to_string(&filename).with_context(|| {
-        format!("Unable to read lockfile: {}", filename.display())
-      })?;
-      let value: serde_json::Value = serde_json::from_str(&s)
-        .context("Unable to parse contents of the lockfile")?;
-      let version = value.get("version").and_then(|v| v.as_str());
-      if version == Some("2") {
-        serde_json::from_value::<LockfileContent>(value)
-          .context("Unable to parse lockfile")?
-      } else {
-        // If there's no version field, we assume that user is using the old
-        // version of the lockfile. We'll migrate it in-place into v2 and it
-        // will be writte in v2 if user uses `--lock-write` flag.
-        let remote: BTreeMap<String, String> =
-          serde_json::from_value(value).context("Unable to parse lockfile")?;
-        LockfileContent {
-          version: "2".to_string(),
-          remote,
-          npm: NpmContent::default(),
-        }
       }
     };
 
@@ -150,6 +223,9 @@ impl Lockfile {
     specifier: &str,
     code: &str,
   ) -> bool {
+    if !(specifier.starts_with("http:") || specifier.starts_with("https:")) {
+      return true;
+    }
     if self.overwrite {
       // In case --lock-write is specified check always passes
       self.insert(specifier, code);
@@ -175,9 +251,6 @@ impl Lockfile {
   /// Checks the given module is included, if so verify the checksum. If module
   /// is not included, insert it.
   fn check_or_insert(&mut self, specifier: &str, code: &str) -> bool {
-    if specifier.starts_with("file:") {
-      return true;
-    }
     if let Some(lockfile_checksum) = self.content.remote.get(specifier) {
       let compiled_checksum = crate::checksum::gen(&[code.as_bytes()]);
       lockfile_checksum == &compiled_checksum
@@ -188,9 +261,6 @@ impl Lockfile {
   }
 
   fn insert(&mut self, specifier: &str, code: &str) {
-    if specifier.starts_with("file:") {
-      return;
-    }
     let checksum = crate::checksum::gen(&[code.as_bytes()]);
     self.content.remote.insert(specifier.to_string(), checksum);
     self.has_content_changed = true;
@@ -200,7 +270,7 @@ impl Lockfile {
     &mut self,
     package: &NpmResolutionPackage,
   ) -> Result<(), LockfileError> {
-    let specifier = package.id.serialize_for_lock_file();
+    let specifier = package.id.as_serialized();
     if let Some(package_info) = self.content.npm.packages.get(&specifier) {
       let integrity = package
         .dist
@@ -209,10 +279,15 @@ impl Lockfile {
         .unwrap_or(&package.dist.shasum);
       if &package_info.integrity != integrity {
         return Err(LockfileError(format!(
-          "Integrity check failed for npm package: \"{}\".
-  Cache has \"{}\" and lockfile has \"{}\".
-  Use \"--lock-write\" flag to update the lockfile.",
-          package.id, integrity, package_info.integrity
+          "Integrity check failed for npm package: \"{}\". Unable to verify that the package
+is the same as when the lockfile was generated.
+
+This could be caused by:
+  * the lock file may be corrupt
+  * the source itself may be corrupt
+
+Use \"--lock-write\" flag to regenerate the lockfile at \"{}\".",
+          package.id.display(), self.filename.display()
         )));
       }
     } else {
@@ -226,7 +301,7 @@ impl Lockfile {
     let dependencies = package
       .dependencies
       .iter()
-      .map(|(name, id)| (name.to_string(), id.serialize_for_lock_file()))
+      .map(|(name, id)| (name.to_string(), id.as_serialized()))
       .collect::<BTreeMap<String, String>>();
 
     let integrity = package
@@ -235,7 +310,7 @@ impl Lockfile {
       .as_ref()
       .unwrap_or(&package.dist.shasum);
     self.content.npm.packages.insert(
-      package.id.serialize_for_lock_file(),
+      package.id.as_serialized(),
       NpmPackageInfo {
         integrity: integrity.to_string(),
         dependencies,
@@ -247,12 +322,13 @@ impl Lockfile {
   pub fn insert_npm_specifier(
     &mut self,
     package_req: &NpmPackageReq,
-    version: String,
+    package_id: &NpmPackageId,
   ) {
-    self.content.npm.specifiers.insert(
-      package_req.to_string(),
-      format!("{}@{}", package_req.name, version),
-    );
+    self
+      .content
+      .npm
+      .specifiers
+      .insert(package_req.to_string(), package_id.as_serialized());
     self.has_content_changed = true;
   }
 }
@@ -338,9 +414,9 @@ mod tests {
   }
 
   #[test]
-  fn new_nonexistent_lockfile() {
+  fn create_lockfile_for_nonexistent_path() {
     let file_path = PathBuf::from("nonexistent_lock_file.json");
-    assert!(Lockfile::new(file_path, false).is_err());
+    assert!(Lockfile::new(file_path, false).is_ok());
   }
 
   #[test]
@@ -485,10 +561,12 @@ mod tests {
       id: NpmPackageId {
         name: "nanoid".to_string(),
         version: NpmVersion::parse("3.3.4").unwrap(),
+        peer_dependencies: Vec::new(),
       },
+      copy_index: 0,
       dist: NpmPackageVersionDistInfo {
-        tarball: "foo".to_string(), 
-        shasum: "foo".to_string(), 
+        tarball: "foo".to_string(),
+        shasum: "foo".to_string(),
         integrity: Some("sha512-MqBkQh/OHTS2egovRtLk45wEyNXwF+cokD+1YPf9u5VfJiRdAiRwB2froX5Co9Rh20xs4siNPm8naNotSD6RBw==".to_string())
       },
       dependencies: HashMap::new(),
@@ -500,10 +578,12 @@ mod tests {
       id: NpmPackageId {
         name: "picocolors".to_string(),
         version: NpmVersion::parse("1.0.0").unwrap(),
+        peer_dependencies: Vec::new(),
       },
+      copy_index: 0,
       dist: NpmPackageVersionDistInfo {
-        tarball: "foo".to_string(), 
-        shasum: "foo".to_string(), 
+        tarball: "foo".to_string(),
+        shasum: "foo".to_string(),
         integrity: Some("sha512-1fygroTLlHu66zi26VoTDv8yRgm0Fccecssto+MhsZ0D/DGW2sm8E8AjW7NU5VVTRt5GxbeZ5qBuJr+HyLYkjQ==".to_string())
       },
       dependencies: HashMap::new(),
@@ -516,10 +596,12 @@ mod tests {
       id: NpmPackageId {
         name: "source-map-js".to_string(),
         version: NpmVersion::parse("1.0.2").unwrap(),
+        peer_dependencies: Vec::new(),
       },
+      copy_index: 0,
       dist: NpmPackageVersionDistInfo {
-        tarball: "foo".to_string(), 
-        shasum: "foo".to_string(), 
+        tarball: "foo".to_string(),
+        shasum: "foo".to_string(),
         integrity: Some("sha512-R0XvVJ9WusLiqTCEiGCmICCMplcCkIwwR11mOSD9CR5u+IXYdiseeEuXCVAjS54zqwkLcPNnmU4OeJ6tUrWhDw==".to_string())
       },
       dependencies: HashMap::new(),
@@ -532,7 +614,9 @@ mod tests {
       id: NpmPackageId {
         name: "source-map-js".to_string(),
         version: NpmVersion::parse("1.0.2").unwrap(),
+        peer_dependencies: Vec::new(),
       },
+      copy_index: 0,
       dist: NpmPackageVersionDistInfo {
         tarball: "foo".to_string(),
         shasum: "foo".to_string(),
