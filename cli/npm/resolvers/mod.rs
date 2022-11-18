@@ -68,7 +68,6 @@ impl NpmProcessState {
 
 #[derive(Clone)]
 pub struct NpmPackageResolver {
-  unstable: bool,
   no_npm: bool,
   inner: Arc<dyn InnerNpmPackageResolver>,
   local_node_modules_path: Option<PathBuf>,
@@ -80,7 +79,6 @@ pub struct NpmPackageResolver {
 impl std::fmt::Debug for NpmPackageResolver {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("NpmPackageResolver")
-      .field("unstable", &self.unstable)
       .field("no_npm", &self.no_npm)
       .field("inner", &"<omitted>")
       .field("local_node_modules_path", &self.local_node_modules_path)
@@ -92,14 +90,12 @@ impl NpmPackageResolver {
   pub fn new(
     cache: NpmCache,
     api: RealNpmRegistryApi,
-    unstable: bool,
     no_npm: bool,
     local_node_modules_path: Option<PathBuf>,
   ) -> Self {
     Self::new_with_maybe_snapshot(
       cache,
       api,
-      unstable,
       no_npm,
       local_node_modules_path,
       None,
@@ -108,10 +104,16 @@ impl NpmPackageResolver {
 
   /// This function will replace current resolver with a new one built from a
   /// snapshot created out of the lockfile.
-  pub async fn add_lockfile(
+  pub async fn add_lockfile_and_maybe_regenerate_snapshot(
     &mut self,
     lockfile: Arc<Mutex<Lockfile>>,
   ) -> Result<(), AnyError> {
+    self.maybe_lockfile = Some(lockfile.clone());
+
+    if lockfile.lock().overwrite {
+      return Ok(());
+    }
+
     let snapshot =
       NpmResolutionSnapshot::from_lockfile(lockfile.clone(), &self.api)
         .await
@@ -121,7 +123,6 @@ impl NpmPackageResolver {
             lockfile.lock().filename.display()
           )
         })?;
-    self.maybe_lockfile = Some(lockfile);
     if let Some(node_modules_folder) = &self.local_node_modules_path {
       self.inner = Arc::new(LocalNpmPackageResolver::new(
         self.cache.clone(),
@@ -142,7 +143,6 @@ impl NpmPackageResolver {
   fn new_with_maybe_snapshot(
     cache: NpmCache,
     api: RealNpmRegistryApi,
-    unstable: bool,
     no_npm: bool,
     local_node_modules_path: Option<PathBuf>,
     initial_snapshot: Option<NpmResolutionSnapshot>,
@@ -170,7 +170,6 @@ impl NpmPackageResolver {
       )),
     };
     Self {
-      unstable,
       no_npm,
       inner,
       local_node_modules_path,
@@ -250,14 +249,10 @@ impl NpmPackageResolver {
       return Ok(());
     }
 
-    if !self.unstable {
-      bail!(
-        "Unstable use of npm specifiers. The --unstable flag must be provided."
-      )
-    }
-
     if self.no_npm {
       let fmt_reqs = packages
+        .iter()
+        .collect::<HashSet<_>>() // prevent duplicates
         .iter()
         .map(|p| format!("\"{}\"", p))
         .collect::<Vec<_>>()
@@ -315,7 +310,6 @@ impl NpmPackageResolver {
     Self::new_with_maybe_snapshot(
       self.cache.clone(),
       self.api.clone(),
-      self.unstable,
       self.no_npm,
       self.local_node_modules_path.clone(),
       Some(self.snapshot()),

@@ -25,6 +25,7 @@ use deno_runtime::deno_node::legacy_main_resolve;
 use deno_runtime::deno_node::package_exports_resolve;
 use deno_runtime::deno_node::package_imports_resolve;
 use deno_runtime::deno_node::package_resolve;
+use deno_runtime::deno_node::path_to_declaration_path;
 use deno_runtime::deno_node::NodeModuleKind;
 use deno_runtime::deno_node::PackageJson;
 use deno_runtime::deno_node::PathClean;
@@ -548,34 +549,6 @@ fn mode_conditions(mode: NodeResolutionMode) -> &'static [&'static str] {
   }
 }
 
-/// Checks if the resolved file has a corresponding declaration file.
-fn path_to_declaration_path(
-  path: PathBuf,
-  referrer_kind: NodeModuleKind,
-) -> PathBuf {
-  let lowercase_path = path.to_string_lossy().to_lowercase();
-  if lowercase_path.ends_with(".d.ts")
-    || lowercase_path.ends_with(".d.cts")
-    || lowercase_path.ends_with(".d.ts")
-  {
-    return path;
-  }
-  let specific_dts_path = match referrer_kind {
-    NodeModuleKind::Cjs => path.with_extension("d.cts"),
-    NodeModuleKind::Esm => path.with_extension("d.mts"),
-  };
-  if specific_dts_path.exists() {
-    specific_dts_path
-  } else {
-    let dts_path = path.with_extension("d.ts");
-    if dts_path.exists() {
-      dts_path
-    } else {
-      path
-    }
-  }
-}
-
 pub fn node_resolve_binary_export(
   pkg_req: &NpmPackageReq,
   bin_name: Option<&str>,
@@ -688,6 +661,8 @@ fn package_config_resolve(
         legacy_main_resolve(&package_config, referrer_kind, conditions)
       {
         return Ok(Some(path));
+      } else {
+        return Ok(None);
       }
     }
     return package_exports_resolve(
@@ -1178,8 +1153,8 @@ fn file_extension_probe(
 ) -> Result<PathBuf, AnyError> {
   let p = p.clean();
   if p.exists() {
-    let mut p_js = p.clone();
-    p_js.set_extension("js");
+    let file_name = p.file_name().unwrap();
+    let p_js = p.with_file_name(format!("{}.js", file_name.to_str().unwrap()));
     if p_js.exists() && p_js.is_file() {
       return Ok(p_js);
     } else if p.is_dir() {
@@ -1187,9 +1162,8 @@ fn file_extension_probe(
     } else {
       return Ok(p);
     }
-  } else {
-    let mut p_js = p.clone();
-    p_js.set_extension("js");
+  } else if let Some(file_name) = p.file_name() {
+    let p_js = p.with_file_name(format!("{}.js", file_name.to_str().unwrap()));
     if p_js.exists() && p_js.is_file() {
       return Ok(p_js);
     }

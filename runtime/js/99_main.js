@@ -587,11 +587,15 @@ delete Intl.v8BreakIterator;
       configurable: true,
       enumerable: true,
       get: webStorage.localStorage,
+      // Makes this reassignable to make astro work
+      set: () => {},
     },
     sessionStorage: {
       configurable: true,
       enumerable: true,
       get: webStorage.sessionStorage,
+      // Makes this reassignable to make astro work
+      set: () => {},
     },
     Storage: util.nonEnumerable(webStorage.Storage),
   };
@@ -700,6 +704,7 @@ delete Intl.v8BreakIterator;
     const wrapConsole = window.__bootstrap.console.wrapConsole;
 
     // Remove bootstrapping data from the global scope
+    const __bootstrap = globalThis.__bootstrap;
     delete globalThis.__bootstrap;
     delete globalThis.bootstrap;
     util.log("bootstrapMainRuntime");
@@ -755,6 +760,27 @@ delete Intl.v8BreakIterator;
 
     const internalSymbol = Symbol("Deno.internal");
 
+    // These have to initialized here and not in `90_deno_ns.js` because
+    // the op function that needs to be passed will be invalidated by creating
+    // a snapshot
+    ObjectAssign(internals, {
+      nodeUnstable: {
+        spawnChild: __bootstrap.spawn.createSpawnChild(
+          ops.op_node_unstable_spawn_child,
+        ),
+        spawn: __bootstrap.spawn.createSpawn(ops.op_node_unstable_spawn_child),
+        spawnSync: __bootstrap.spawn.createSpawnSync(
+          ops.op_node_unstable_spawn_sync,
+        ),
+        serve: __bootstrap.flash.createServe(ops.op_node_unstable_flash_serve),
+        upgradeHttpRaw: __bootstrap.flash.upgradeHttpRaw,
+        listenDatagram: __bootstrap.net.createListenDatagram(
+          ops.op_node_unstable_net_listen_udp,
+          ops.op_node_unstable_net_listen_unixpacket,
+        ),
+      },
+    });
+
     const finalDenoNs = {
       core,
       internal: internalSymbol,
@@ -773,6 +799,19 @@ delete Intl.v8BreakIterator;
 
     if (runtimeOptions.unstableFlag) {
       ObjectAssign(finalDenoNs, denoNsUnstable);
+      // These have to initialized here and not in `90_deno_ns.js` because
+      // the op function that needs to be passed will be invalidated by creating
+      // a snapshot
+      ObjectAssign(finalDenoNs, {
+        spawnChild: __bootstrap.spawn.createSpawnChild(ops.op_spawn_child),
+        spawn: __bootstrap.spawn.createSpawn(ops.op_spawn_child),
+        spawnSync: __bootstrap.spawn.createSpawnSync(ops.op_spawn_sync),
+        serve: __bootstrap.flash.createServe(ops.op_flash_serve),
+        listenDatagram: __bootstrap.net.createListenDatagram(
+          ops.op_net_listen_udp,
+          ops.op_net_listen_unixpacket,
+        ),
+      });
     }
 
     // Setup `Deno` global - we're actually overriding already existing global
@@ -800,6 +839,7 @@ delete Intl.v8BreakIterator;
     const wrapConsole = window.__bootstrap.console.wrapConsole;
 
     // Remove bootstrapping data from the global scope
+    const __bootstrap = globalThis.__bootstrap;
     delete globalThis.__bootstrap;
     delete globalThis.bootstrap;
     util.log("bootstrapWorkerRuntime");
@@ -849,6 +889,27 @@ delete Intl.v8BreakIterator;
 
     const internalSymbol = Symbol("Deno.internal");
 
+    // These have to initialized here and not in `90_deno_ns.js` because
+    // the op function that needs to be passed will be invalidated by creating
+    // a snapshot
+    ObjectAssign(internals, {
+      nodeUnstable: {
+        spawnChild: __bootstrap.spawn.createSpawnChild(
+          ops.op_node_unstable_spawn_child,
+        ),
+        spawn: __bootstrap.spawn.createSpawn(ops.op_node_unstable_spawn_child),
+        spawnSync: __bootstrap.spawn.createSpawnSync(
+          ops.op_node_unstable_spawn_sync,
+        ),
+        serve: __bootstrap.flash.createServe(ops.op_node_unstable_flash_serve),
+        upgradeHttpRaw: __bootstrap.flash.upgradeHttpRaw,
+        listenDatagram: __bootstrap.net.createListenDatagram(
+          ops.op_node_unstable_net_listen_udp,
+          ops.op_node_unstable_net_listen_unixpacket,
+        ),
+      },
+    });
+
     const finalDenoNs = {
       core,
       internal: internalSymbol,
@@ -859,6 +920,19 @@ delete Intl.v8BreakIterator;
     };
     if (runtimeOptions.unstableFlag) {
       ObjectAssign(finalDenoNs, denoNsUnstable);
+      // These have to initialized here and not in `90_deno_ns.js` because
+      // the op function that needs to be passed will be invalidated by creating
+      // a snapshot
+      ObjectAssign(finalDenoNs, {
+        spawnChild: __bootstrap.spawn.createSpawnChild(ops.op_spawn_child),
+        spawn: __bootstrap.spawn.createSpawn(ops.op_spawn_child),
+        spawnSync: __bootstrap.spawn.createSpawnSync(ops.op_spawn_sync),
+        serve: __bootstrap.flash.createServe(ops.op_flash_serve),
+        listenDatagram: __bootstrap.net.createListenDatagram(
+          ops.op_net_listen_udp,
+          ops.op_net_listen_unixpacket,
+        ),
+      });
     }
     ObjectDefineProperties(finalDenoNs, {
       pid: util.readOnly(runtimeOptions.pid),
