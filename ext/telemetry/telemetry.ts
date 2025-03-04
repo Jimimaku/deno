@@ -139,13 +139,13 @@ interface IKeyValue {
   value: IAnyValue;
 }
 
-function hrToSecs(hr: [number, number]): number {
-  return (hr[0] * 1e3 + hr[1] / 1e6) / 1000;
+function hrToMs(hr: [number, number]): number {
+  return (hr[0] * 1e3 + hr[1] / 1e6);
 }
 
 export function enterSpan(span: Span): Context | undefined {
   if (!span.isRecording()) return undefined;
-  const context = (CURRENT.get() || ROOT_CONTEXT).setValue(SPAN_KEY, span);
+  const context = (CURRENT.get() ?? ROOT_CONTEXT).setValue(SPAN_KEY, span);
   return CURRENT.enter(context);
 }
 
@@ -254,9 +254,9 @@ class Tracer {
       throw new Error("startActiveSpan requires a function argument");
     }
     if (options?.root) {
-      context = undefined;
+      context = ROOT_CONTEXT;
     } else {
-      context = context ?? CURRENT.get();
+      context = context ?? CURRENT.get() ?? ROOT_CONTEXT;
     }
     const span = this.startSpan(name, options, context);
     const ctx = CURRENT.enter(context.setValue(SPAN_KEY, span));
@@ -276,7 +276,7 @@ class Tracer {
 
     let startTime = options?.startTime;
     if (startTime && ArrayIsArray(startTime)) {
-      startTime = hrToSecs(startTime);
+      startTime = hrToMs(startTime);
     } else if (startTime && isDate(startTime)) {
       startTime = DatePrototypeGetTime(startTime);
     }
@@ -383,7 +383,7 @@ class Span {
 
   end(endTime?: TimeInput): void {
     if (endTime && ArrayIsArray(endTime)) {
-      endTime = hrToSecs(endTime);
+      endTime = hrToMs(endTime);
     } else if (endTime && isDate(endTime)) {
       endTime = DatePrototypeGetTime(endTime);
     }
